@@ -1,0 +1,12 @@
+# 不作为 Workers 静态资产上传的文件
+# 大文件（客户端 zip / 整合包）不放站点，客户端下载走 GitHub Releases
+NaMelon's-Server专用客户端.zip
+modpack.mrpack
+
+# 部署配置与本地其他文件
+worker.js
+wrangler.toml
+.assetsignore
+.wrangler
+.github
+高一17班·课堂助手.html

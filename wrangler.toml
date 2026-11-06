@@ -1,0 +1,11 @@
+# Worker 名称：留作占位默认值，部署时由 GitHub 变量/Secret
+# CLOUDFLARE_WORKER_NAME 通过 --name 覆盖，无需改这里
+name = "my-worker"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+
+# 静态资产：index.html 等由 Cloudflare 直接托管
+# 客户端 zip 放在 GitHub Releases，无需 R2
+[assets]
+directory = "."
+binding = "ASSETS"

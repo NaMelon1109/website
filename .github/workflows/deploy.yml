@@ -1,0 +1,44 @@
+name: Deploy Cloudflare Worker
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloudflare-worker
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WORKER_NAME: ${{ vars.CLOUDFLARE_WORKER_NAME || secrets.CLOUDFLARE_WORKER_NAME }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check deployment config
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::请先在仓库 Settings → Secrets 添加 CLOUDFLARE_API_TOKEN"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::请先在仓库 Settings → Secrets 添加 CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+          test -n "$WORKER_NAME" || { echo "::error::请设置仓库 Variables 或 Secrets：CLOUDFLARE_WORKER_NAME"; exit 1; }
+          echo "准备部署到 Worker：$WORKER_NAME"
+
+      - name: Deploy with Wrangler
+        run: npx --yes wrangler@4 deploy --name "$WORKER_NAME"

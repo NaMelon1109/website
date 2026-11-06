@@ -1,0 +1,10 @@
+# 本地大文件：不要提交到 GitHub
+modpack.mrpack
+NaMelon's-Server专用客户端.zip
+
+# 本地课堂助手（不需要部署时可忽略；想上线就删除这一行）
+高一17班·课堂助手.html
+
+# Wrangler / Node 本地缓存
+.wrangler/
+node_modules/
