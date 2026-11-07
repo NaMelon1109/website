@@ -1,6 +1,4 @@
-# Worker 名称：留作占位默认值，部署时由 GitHub 变量/Secret
-# CLOUDFLARE_WORKER_NAME 通过 --name 覆盖，无需改这里
-name = "my-worker"
+name = "minecraft-melon-homepage"
 main = "worker.js"
 compatibility_date = "2025-06-01"
 
