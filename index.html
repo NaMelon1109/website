@@ -2596,13 +2596,114 @@ function rosterOfGroup(groupName) {
   return roster.filter(s => s.group === groupName);
 }
 
-function persistRoster()  { writeJSON(ROSTER_KEY, roster); }
-function persistGroups()  { writeJSON(GROUP_META_KEY, groupMeta); }
-function persistConduct() { writeJSON(CONDUCT_KEY, conductScores); }
+function persistRoster()  { writeJSON(ROSTER_KEY, roster); d1Push('roster', roster); }
+function persistGroups()  { writeJSON(GROUP_META_KEY, groupMeta); d1Push('groupMeta', groupMeta); }
+function persistConduct() { writeJSON(CONDUCT_KEY, conductScores); d1Push('conductScores', conductScores); }
 function persistAll() {
   persistRoster();
   persistGroups();
   persistConduct();
+}
+
+/* ==========================================================
+   D1 云同步：localStorage 仅作本地缓存，D1 为全局数据源
+   ========================================================== */
+let d1Synced = false;               // 首次拉取完成前不推送，避免旧数据覆盖云端
+const d1Pending = new Map();        // key -> 待推送 value
+let d1FlushTimer = null;
+const D1_DEBOUNCE_MS = { treeGrowth: 5000 };  // 高频 key 单独节流
+
+function d1Queue(key, value) {
+  d1Pending.set(key, value);
+  if (d1FlushTimer) clearTimeout(d1FlushTimer);
+  d1FlushTimer = setTimeout(d1Flush, D1_DEBOUNCE_MS[key] || 600);
+}
+
+function d1Push(key, value) {
+  if (!d1Synced) return;
+  d1Queue(key, value);
+}
+
+async function d1Flush() {
+  d1FlushTimer = null;
+  const jobs = Array.from(d1Pending.entries());
+  d1Pending.clear();
+  for (const [key, value] of jobs) {
+    try {
+      await fetch('/api/data/' + key, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value })
+      });
+    } catch (e) {}
+  }
+}
+
+function d1FlushKeepalive() {
+  // 离开页面前一次性发出待推送数据（keepalive 保证请求发完）
+  if (d1FlushTimer) { clearTimeout(d1FlushTimer); d1FlushTimer = null; }
+  d1Pending.forEach((value, key) => {
+    fetch('/api/data/' + key, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+      keepalive: true
+    }).catch(() => {});
+  });
+  d1Pending.clear();
+}
+
+async function syncFromD1() {
+  let data = null;
+  try {
+    const res = await fetch('/api/data');
+    if (res.ok) data = await res.json();
+  } catch (e) {}
+
+  if (!data) { d1Synced = true; return; }  // 离线/接口不可用：继续用本地数据
+
+  const isEmpty = !data.roster && !data.groupMeta && !data.conductScores && data.treeGrowth == null;
+
+  if (isEmpty) {
+    // 云端为空：把本地数据一次性迁入 D1（首次使用/新数据库）
+    d1Queue('roster', roster);
+    d1Queue('groupMeta', groupMeta);
+    d1Queue('conductScores', conductScores);
+    d1Queue('treeGrowth', treeGrowth);
+    d1Synced = true;
+    return;
+  }
+
+  // 云端为准：应用云端数据，云端缺失的 key 用本地补齐
+  if (data.roster)         roster        = sanitizeRoster(data.roster);
+  else                     d1Queue('roster', roster);
+  if (data.groupMeta)      groupMeta     = sanitizeGroupMeta(data.groupMeta);
+  else                     d1Queue('groupMeta', groupMeta);
+  if (data.conductScores)  conductScores = sanitizeConduct(data.conductScores);
+  else                     d1Queue('conductScores', conductScores);
+
+  if (typeof data.treeGrowth === 'number' && Number.isFinite(data.treeGrowth)) {
+    treeGrowth = Math.max(0, Math.min(100, data.treeGrowth));
+  } else {
+    d1Queue('treeGrowth', treeGrowth);
+  }
+
+  normalizeData();
+
+  writeJSON(ROSTER_KEY, roster);
+  writeJSON(GROUP_META_KEY, groupMeta);
+  writeJSON(CONDUCT_KEY, conductScores);
+
+  refreshRosterDerived();
+  afterRosterChange();
+
+  if (typeof renderTreeUI === 'function') {
+    lastRenderedGrowthKey = null;
+    lastStageIndex = -1;
+    renderTreeUI(treeSmoothVol, treeGrowth);
+  }
+
+  d1Synced = true;
 }
 
 /* 旧数据迁移：把 v4 操行分 + v6 小组积分合并成新结构 */
@@ -2665,44 +2766,54 @@ function migrateData() {
   persistAll();
 }
 
-function loadData() {
-  migrateData();
-
-  const r = readJSON(ROSTER_KEY);
-  const g = readJSON(GROUP_META_KEY);
-  const c = readJSON(CONDUCT_KEY);
-
-  roster = Array.isArray(r)
+function sanitizeRoster(r) {
+  return Array.isArray(r)
     ? r.filter(s => s && s.name).map(s => ({
         name:  String(s.name).slice(0, 10),
         group: (String(s.group || '一组').slice(0, 12) || '一组')
       }))
     : [];
+}
 
-  groupMeta = Array.isArray(g) && g.length
+function sanitizeGroupMeta(g) {
+  const meta = Array.isArray(g)
     ? g.filter(x => x && x.name).map(x => ({
         name:  String(x.name).slice(0, 12),
         score: Number.isFinite(Number(x.score)) ? Number(x.score) : 0,
         hue:   Number.isFinite(Number(x.hue)) ? Number(x.hue) : baseHue(String(x.name))
       }))
-    : defaultGroupMeta();
+    : [];
+  return meta.length ? meta : defaultGroupMeta();
+}
 
-  if (!groupMeta.length) groupMeta = defaultGroupMeta();
-
-  conductScores = {};
+function sanitizeConduct(c) {
+  const out = {};
   if (c && typeof c === 'object' && !Array.isArray(c)) {
     Object.keys(c).forEach(k => {
       const v = Number(c[k]);
-      conductScores[k] = Number.isFinite(v) ? v : INIT_SCORE;
+      out[k] = Number.isFinite(v) ? v : INIT_SCORE;
     });
   }
+  return out;
+}
 
+function normalizeData() {
   roster.forEach(s => {
     if (conductScores[s.name] === undefined) conductScores[s.name] = INIT_SCORE;
     if (!groupMeta.some(x => x.name === s.group)) {
       groupMeta.push({ name: s.group, score: 0, hue: baseHue(s.group) });
     }
   });
+}
+
+function loadData() {
+  migrateData();
+
+  roster        = sanitizeRoster(readJSON(ROSTER_KEY));
+  groupMeta     = sanitizeGroupMeta(readJSON(GROUP_META_KEY));
+  conductScores = sanitizeConduct(readJSON(CONDUCT_KEY));
+
+  normalizeData();
 }
 
 function refreshRosterDerived() {
@@ -3685,6 +3796,7 @@ function saveTreeGrowth(force) {
   try {
     localStorage.setItem(TREE_KEY, String(Math.round(treeGrowth)));
   } catch (e) {}
+  d1Push('treeGrowth', Math.round(treeGrowth));
 }
 
 function loadTreeGrowth() {
@@ -3785,6 +3897,9 @@ treeGrowth = loadTreeGrowth();
 renderTreeUI(0, treeGrowth);
 lastStageIndex = -1;
 updateStageTrack(treeGrowth);
+
+/* 所有模块初始化完成后，从 D1 拉取全局数据（异步，云端为准） */
+syncFromD1();
 
 
 /* ==========================================================
@@ -5077,6 +5192,7 @@ document.addEventListener('fullscreenchange', syncFsBtn);
 window.addEventListener('beforeunload', () => {
   if (meterRunning) stopMeter();
   if (treeRunning) stopTreeMeter();
+  d1FlushKeepalive();   // 兜底：把待推送数据发往 D1
 });
 
 
