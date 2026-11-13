@@ -1582,6 +1582,56 @@
     color: #64748b;
     margin-bottom: 12px;
   }
+
+  /* ========== 数据码弹窗 ========== */
+  .data-box {
+    width: min(660px, 100%);
+    text-align: left;
+  }
+  .data-box h3 { text-align: center; }
+  .data-tip {
+    text-align: left;
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: #64748b;
+    margin-bottom: 14px;
+  }
+  .data-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: #334155;
+    margin-bottom: 8px;
+  }
+  .data-area {
+    width: 100%;
+    min-height: 88px;
+    resize: vertical;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    border: 2px solid #e2e8f0;
+    border-radius: 12px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #1e293b;
+    background: #f8fafc;
+    outline: none;
+    word-break: break-all;
+    transition: border-color .18s, box-shadow .18s;
+  }
+  .data-area:focus {
+    border-color: #6366f1;
+    background: #fff;
+    box-shadow: 0 0 0 4px rgba(99, 102, 241, .13);
+  }
+  .data-btns { display: flex; gap: 10px; margin-top: 8px; }
+  .data-btns .modal-btn { flex: none; padding: 10px 16px; font-size: 13.5px; }
+  .data-btns .modal-btn.cancel { flex: 1; }
+  .data-sep {
+    height: 1px;
+    background: #e8ecf3;
+    margin: 16px 0 14px;
+  }
   .import-drop {
     position: relative;
     display: block;
@@ -2071,6 +2121,7 @@
     </div>
     <div class="head-right">
       <span class="clock" id="clock">--</span>
+      <button class="head-btn" id="dataCodeBtn" title="数据码同步（保存/导入全部数据）" aria-label="数据码同步">🔑</button>
       <button class="head-btn" id="fsBtn" title="切换全屏" aria-label="切换全屏">⛶</button>
     </div>
   </header>
@@ -2342,6 +2393,36 @@
   </div>
 </div>
 
+<!-- 数据码弹窗 -->
+<div class="modal" id="dataModal">
+  <div class="modal-box data-box">
+    <h3>🔑 数据码同步</h3>
+    <p class="data-tip">
+      导出：把名单（座位表）、小组积分、操行分、声音之树全部打包成一段数据码，保存或分享。
+      导入：在其他设备粘贴数据码即可恢复全部数据。数据码带防篡改校验，被改动或复制不完整会拒绝导入。
+    </p>
+    <div class="data-section">
+      <div class="data-label">保存数据码（导出）</div>
+      <textarea id="dataExportArea" class="data-area" readonly placeholder="点击「生成数据码」后，代码会显示在这里"></textarea>
+      <div class="data-btns">
+        <button class="modal-btn ok" id="dataExportBtn">生成数据码</button>
+        <button class="modal-btn cancel" id="dataCopyBtn" disabled>复制数据码</button>
+      </div>
+    </div>
+    <div class="data-sep"></div>
+    <div class="data-section">
+      <div class="data-label">输入数据码（导入）</div>
+      <textarea id="dataImportArea" class="data-area" placeholder="把数据码粘贴到这里"></textarea>
+      <div class="data-btns">
+        <button class="modal-btn ok" id="dataImportBtn">导入并覆盖本机数据</button>
+      </div>
+    </div>
+    <div class="modal-btns">
+      <button class="modal-btn cancel" id="dataCloseBtn">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- ★ 密码验证弹窗 -->
 <div class="modal" id="pwdModal">
   <div class="pwd-box">
@@ -2596,9 +2677,9 @@ function rosterOfGroup(groupName) {
   return roster.filter(s => s.group === groupName);
 }
 
-function persistRoster()  { writeJSON(ROSTER_KEY, roster); d1Push('roster', roster); }
-function persistGroups()  { writeJSON(GROUP_META_KEY, groupMeta); d1Push('groupMeta', groupMeta); }
-function persistConduct() { writeJSON(CONDUCT_KEY, conductScores); d1Push('conductScores', conductScores); }
+function persistRoster()  { writeJSON(ROSTER_KEY, roster); }
+function persistGroups()  { writeJSON(GROUP_META_KEY, groupMeta); }
+function persistConduct() { writeJSON(CONDUCT_KEY, conductScores); }
 function persistAll() {
   persistRoster();
   persistGroups();
@@ -2606,93 +2687,270 @@ function persistAll() {
 }
 
 /* ==========================================================
-   D1 云同步：localStorage 仅作本地缓存，D1 为全局数据源
+   数据码：导出/导入全部数据（deflate 压缩 + HMAC 防篡改校验）
+   数据保存在本机 localStorage；数据码用于跨设备同步
    ========================================================== */
-let d1Synced = false;               // 首次拉取完成前不推送，避免旧数据覆盖云端
-const d1Pending = new Map();        // key -> 待推送 value
-let d1FlushTimer = null;
-const D1_DEBOUNCE_MS = { treeGrowth: 5000 };  // 高频 key 单独节流
+const CODE_KEY = 'gy17-classroom-helper-2026';   // HMAC 密钥：防止数据码被改动/复制出错
+const CODE_SIG_DIGITS = 15;                     // 6 字节签名 → 最多 15 位十进制
+const enc = new TextEncoder();
+const dec = new TextDecoder();
 
-function d1Queue(key, value) {
-  d1Pending.set(key, value);
-  if (d1FlushTimer) clearTimeout(d1FlushTimer);
-  d1FlushTimer = setTimeout(d1Flush, D1_DEBOUNCE_MS[key] || 600);
+async function codecDeflate(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-function d1Push(key, value) {
-  if (!d1Synced) return;
-  d1Queue(key, value);
+async function codecInflate(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-async function d1Flush() {
-  d1FlushTimer = null;
-  const jobs = Array.from(d1Pending.entries());
-  d1Pending.clear();
-  for (const [key, value] of jobs) {
-    try {
-      await fetch('/api/data/' + key, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value })
-      });
-    } catch (e) {}
+/* ── 位级紧凑编码：按位打包，默认值用标志位省略 ── */
+class BitWriter {
+  constructor() { this.bytes = []; this.cur = 0; this.n = 0; }
+  write(value, bits) {   // LSB 优先
+    for (let i = 0; i < bits; i++) {
+      this.cur |= ((value >> i) & 1) << this.n;
+      if (++this.n === 8) { this.bytes.push(this.cur); this.cur = 0; this.n = 0; }
+    }
+  }
+  finish() { if (this.n) this.bytes.push(this.cur); return new Uint8Array(this.bytes); }
+}
+
+class BitReader {
+  constructor(data) { this.d = data; this.p = 0; this.n = 0; }
+  read(bits) {
+    let v = 0;
+    for (let i = 0; i < bits; i++) {
+      if (this.p >= this.d.length) throw new Error('数据码内容无效');
+      v |= ((this.d[this.p] >> this.n) & 1) << i;
+      if (++this.n === 8) { this.n = 0; this.p++; }
+    }
+    return v;
+  }
+  done() {   // 剩余位必须是填充的 0
+    if (this.p < this.d.length) {
+      for (let i = this.n; i < 8; i++) if ((this.d[this.p] >> i) & 1) throw new Error('数据码内容无效');
+      for (let j = this.p + 1; j < this.d.length; j++) if (this.d[j]) throw new Error('数据码内容无效');
+    }
   }
 }
 
-function d1FlushKeepalive() {
-  // 离开页面前一次性发出待推送数据（keepalive 保证请求发完）
-  if (d1FlushTimer) { clearTimeout(d1FlushTimer); d1FlushTimer = null; }
-  d1Pending.forEach((value, key) => {
-    fetch('/api/data/' + key, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value }),
-      keepalive: true
-    }).catch(() => {});
-  });
-  d1Pending.clear();
+function writeUvar(w, v) {
+  while (v >= 0x80) { w.write((v & 0x7F) | 0x80, 8); v = Math.floor(v / 128); }
+  w.write(v, 8);
+}
+function readUvar(r) {
+  let v = 0, s = 0;
+  while (true) {
+    const b = r.read(8);
+    v |= (b & 0x7F) << s;
+    if (!(b & 0x80)) return v;
+    s += 7;
+    if (s >= 42) throw new Error('数据码内容无效');
+  }
+}
+function writeVar(w, v) { writeUvar(w, (v << 1) ^ (v >> 31)); }
+function readVar(r) {
+  const u = readUvar(r);
+  const v = (u >>> 1) ^ -(u & 1);   // zigzag 解码
+  if (Math.abs(v) > 1000000) throw new Error('数据码内容无效');
+  return v;
+}
+function writeStrBits(w, s, lenBits) {
+  const b = enc.encode(String(s));
+  w.write(b.length, lenBits);
+  for (let i = 0; i < b.length; i++) w.write(b[i], 8);
+}
+function readStrBits(r, lenBits, maxChars) {
+  const len = r.read(lenBits);
+  const bytes = [];
+  for (let i = 0; i < len; i++) bytes.push(r.read(8));
+  return dec.decode(new Uint8Array(bytes)).slice(0, maxChars);
 }
 
-async function syncFromD1() {
-  let data = null;
-  try {
-    const res = await fetch('/api/data');
-    if (res.ok) data = await res.json();
-  } catch (e) {}
+const GROUP_PRESETS = ['一组', '二组', '三组', '四组', '五组', '六组'];
+/* 常见姓氏表：姓名首字命中时用 7 位索引代替 3 字节，显著缩短数据码 */
+const SURNAMES = '王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤';
 
-  if (!data) { d1Synced = true; return; }  // 离线/接口不可用：继续用本地数据
-
-  const isEmpty = !data.roster && !data.groupMeta && !data.conductScores && data.treeGrowth == null;
-
-  if (isEmpty) {
-    // 云端为空：把本地数据一次性迁入 D1（首次使用/新数据库）
-    d1Queue('roster', roster);
-    d1Queue('groupMeta', groupMeta);
-    d1Queue('conductScores', conductScores);
-    d1Queue('treeGrowth', treeGrowth);
-    d1Synced = true;
-    return;
-  }
-
-  // 云端为准：应用云端数据，云端缺失的 key 用本地补齐
-  if (data.roster)         roster        = sanitizeRoster(data.roster);
-  else                     d1Queue('roster', roster);
-  if (data.groupMeta)      groupMeta     = sanitizeGroupMeta(data.groupMeta);
-  else                     d1Queue('groupMeta', groupMeta);
-  if (data.conductScores)  conductScores = sanitizeConduct(data.conductScores);
-  else                     d1Queue('conductScores', conductScores);
-
-  if (typeof data.treeGrowth === 'number' && Number.isFinite(data.treeGrowth)) {
-    treeGrowth = Math.max(0, Math.min(100, data.treeGrowth));
+function writeNameBits(w, name) {
+  const b = enc.encode(String(name));
+  const first = String(name).charAt(0);
+  const si = first ? SURNAMES.indexOf(first) : -1;
+  w.write(si >= 0 ? 1 : 0, 1);
+  if (si >= 0) {
+    w.write(si, 7);
+    w.write(b.length - 3, 5);   // 剩余字节数（姓氏占 3 字节）
+    for (let i = 3; i < b.length; i++) w.write(b[i], 8);
   } else {
-    d1Queue('treeGrowth', treeGrowth);
+    w.write(b.length, 5);
+    for (let i = 0; i < b.length; i++) w.write(b[i], 8);
   }
+}
+
+function readNameBits(r, maxChars) {
+  if (r.read(1)) {
+    const si = r.read(7);
+    const restLen = r.read(5);
+    if (si >= SURNAMES.length) throw new Error('数据码内容无效');
+    const bytes = Array.from(enc.encode(SURNAMES[si]));
+    for (let i = 0; i < restLen; i++) bytes.push(r.read(8));
+    return dec.decode(new Uint8Array(bytes)).slice(0, maxChars);
+  }
+  const len = r.read(5);
+  const bytes = [];
+  for (let i = 0; i < len; i++) bytes.push(r.read(8));
+  return dec.decode(new Uint8Array(bytes)).slice(0, maxChars);
+}
+
+function serializeData() {
+  const w = new BitWriter();
+  w.write(1, 2);                                      // 版本
+  const tg = Math.round(treeGrowth);
+  w.write(tg > 0 ? 1 : 0, 1);                         // 声音之树：0 时省略
+  if (tg > 0) w.write(tg, 7);
+
+  writeUvar(w, groupMeta.length);
+  groupMeta.forEach(g => {
+    const pi = GROUP_PRESETS.indexOf(g.name);
+    w.write(pi >= 0 ? 1 : 0, 1);                      // 预设组名 → 3 位索引，省 6 字节
+    if (pi >= 0) w.write(pi, 3);
+    else writeStrBits(w, String(g.name).slice(0, 12), 6);
+    w.write((Math.round(Number(g.hue) || 0) % 360 + 360) % 360, 9);
+    const sc = Math.round((Number(g.score) || 0) * 2);   // 小组积分：0 时省略
+    w.write(sc !== 0 ? 1 : 0, 1);
+    if (sc !== 0) writeVar(w, sc);
+  });
+
+  writeUvar(w, roster.length);
+  const gBits = Math.max(1, Math.ceil(Math.log2(Math.max(1, groupMeta.length))));
+  roster.forEach(s => {
+    writeNameBits(w, String(s.name).slice(0, 10));
+    let gi = groupMeta.findIndex(x => x.name === s.group);
+    if (gi < 0) gi = 0;
+    w.write(gi, gBits);
+  });
+  roster.forEach(s => {
+    const sc = Math.round(getScore(s.name)) - 100;     // 操行分：相对默认 100 的差值，未变时省略
+    w.write(sc !== 0 ? 1 : 0, 1);
+    if (sc !== 0) writeVar(w, sc);
+  });
+  return w.finish();
+}
+
+function parseBinary(data) {
+  const r = new BitReader(data);
+  if (r.read(2) !== 1) throw new Error('数据码版本不支持');
+
+  let treeGrowth = 0;
+  if (r.read(1)) { treeGrowth = r.read(7); if (treeGrowth > 100) throw new Error('数据码内容无效'); }
+
+  const gCount = readUvar(r);
+  if (gCount > 60) throw new Error('数据码内容无效');
+  const groups = [];
+  for (let i = 0; i < gCount; i++) {
+    let name;
+    if (r.read(1)) name = GROUP_PRESETS[r.read(3)] || ('小组' + (i + 1));
+    else name = readStrBits(r, 6, 12) || ('小组' + (i + 1));
+    const hue = r.read(9) % 360;
+    const score = r.read(1) ? readVar(r) / 2 : 0;
+    groups.push({ name, score, hue });
+  }
+
+  const rCount = readUvar(r);
+  if (rCount > 200) throw new Error('数据码内容无效');
+  const gBits = Math.max(1, Math.ceil(Math.log2(Math.max(1, gCount))));
+  const roster = [];
+  for (let i = 0; i < rCount; i++) {
+    const name = readNameBits(r, 10);
+    if (!name) throw new Error('数据码内容无效');
+    const gi = r.read(gBits);
+    roster.push({ name, group: (groups[gi] || groups[0] || { name: '一组' }).name });
+  }
+
+  const conductScores = {};
+  for (let i = 0; i < rCount; i++) {
+    conductScores[roster[i].name] = 100 + (r.read(1) ? readVar(r) : 0);
+  }
+
+  r.done();
+  return { roster, groupMeta: groups, conductScores, treeGrowth };
+}
+
+/* ── 大整数十进制转换：把字节流变成纯数字 ── */
+function bytesToDigits(bytes) {
+  let hex = '';
+  bytes.forEach(b => { hex += b.toString(16).padStart(2, '0'); });
+  return hex ? BigInt('0x' + hex).toString(10) : '0';
+}
+
+function digitsToBytes(digits) {
+  const n = BigInt(digits);
+  let hex = n.toString(16);
+  if (hex.length % 2) hex = '0' + hex;
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+async function codeSignDigits(digits) {
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(CODE_KEY), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(digits));
+  return bytesToDigits(new Uint8Array(sig).slice(0, 6)).padStart(CODE_SIG_DIGITS, '0');
+}
+
+async function codeVerifyDigits(digits, sigDigits) {
+  return (await codeSignDigits(digits)) === sigDigits;
+}
+
+async function exportDataCode() {
+  const compressed = await codecDeflate(serializeData());
+  // 头部补一个 0x01：防止前导零字节在大整数转换时被吞掉
+  const payload = new Uint8Array(compressed.length + 1);
+  payload[0] = 1;
+  payload.set(compressed, 1);
+  const dataDigits = bytesToDigits(payload);
+  return dataDigits + await codeSignDigits(dataDigits);
+}
+
+/* 解析并校验数据码，返回清洗后的数据（不修改当前状态） */
+async function parseDataCode(code) {
+  const s = String(code || '').trim();
+  if (!/^[0-9]{25,6000}$/.test(s)) throw new Error('数据码格式不正确');
+  const sigDigits = s.slice(-CODE_SIG_DIGITS);
+  const dataDigits = s.slice(0, -CODE_SIG_DIGITS);
+  if (!(await codeVerifyDigits(dataDigits, sigDigits))) {
+    throw new Error('校验失败：数据码被篡改或复制不完整');
+  }
+  let d;
+  try {
+    const bytes = digitsToBytes(dataDigits);
+    if (!bytes.length || bytes[0] !== 1) throw new Error('数据码无法解析，可能已损坏');
+    const raw = await codecInflate(bytes.subarray(1));
+    d = parseBinary(raw);
+  } catch (e) {
+    throw new Error(/无效|版本|损坏/.test(e.message) ? e.message : '数据码无法解析，可能已损坏');
+  }
+  return {
+    roster:        sanitizeRoster(d.roster),
+    groupMeta:     sanitizeGroupMeta(d.groupMeta),
+    conductScores: sanitizeConduct(d.conductScores),
+    treeGrowth:    Math.max(0, Math.min(100, Math.round(d.treeGrowth)))
+  };
+}
+
+/* 应用导入的数据并刷新所有模块（声音之树/小组积分/操行分/座位表） */
+function applyDataCode(d) {
+  roster        = d.roster;
+  groupMeta     = d.groupMeta;
+  conductScores = d.conductScores;
+  treeGrowth    = d.treeGrowth;
 
   normalizeData();
-
-  writeJSON(ROSTER_KEY, roster);
-  writeJSON(GROUP_META_KEY, groupMeta);
-  writeJSON(CONDUCT_KEY, conductScores);
+  persistAll();
+  try { localStorage.setItem(TREE_KEY, String(Math.round(treeGrowth))); } catch (e) {}
 
   refreshRosterDerived();
   afterRosterChange();
@@ -2702,9 +2960,69 @@ async function syncFromD1() {
     lastStageIndex = -1;
     renderTreeUI(treeSmoothVol, treeGrowth);
   }
-
-  d1Synced = true;
 }
+
+/* ── 数据码弹窗交互 ── */
+const dataModal      = document.getElementById('dataModal');
+const dataCodeBtn    = document.getElementById('dataCodeBtn');
+const dataExportArea = document.getElementById('dataExportArea');
+const dataImportArea = document.getElementById('dataImportArea');
+const dataExportBtn  = document.getElementById('dataExportBtn');
+const dataCopyBtn    = document.getElementById('dataCopyBtn');
+const dataImportBtn  = document.getElementById('dataImportBtn');
+const dataCloseBtn   = document.getElementById('dataCloseBtn');
+
+let lastExportCode = '';
+
+dataCodeBtn.addEventListener('click', () => {
+  openModal(dataModal, dataExportBtn);
+});
+
+dataExportBtn.addEventListener('click', async () => {
+  try {
+    lastExportCode = await exportDataCode();
+    dataExportArea.value = lastExportCode;
+    dataCopyBtn.disabled = false;
+    showToast('数据码已生成');
+  } catch (e) {
+    showToast('生成失败：' + (e && e.message ? e.message : e));
+  }
+});
+
+dataCopyBtn.addEventListener('click', async () => {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(lastExportCode);
+    } else {
+      dataExportArea.select();
+      document.execCommand('copy');
+    }
+    showToast('已复制到剪贴板');
+  } catch (e) {
+    dataExportArea.select();
+    document.execCommand('copy');
+    showToast('已复制到剪贴板');
+  }
+});
+
+dataImportBtn.addEventListener('click', async () => {
+  const code = dataImportArea.value;
+  if (!String(code).trim()) { showToast('请先粘贴数据码'); return; }
+  let parsed = null;
+  try {
+    parsed = await parseDataCode(code);
+  } catch (e) {
+    showToast(e && e.message ? e.message : '导入失败');
+    return;
+  }
+  askConfirm('确认导入数据码', '导入将用数据码中的内容覆盖本机当前数据（名单/小组积分/操行分/声音之树），确定继续吗？', () => {
+    applyDataCode(parsed);
+    dataImportArea.value = '';
+    showToast('导入成功，数据已同步');
+  });
+});
+
+dataCloseBtn.addEventListener('click', () => closeModal(dataModal));
 
 /* 旧数据迁移：把 v4 操行分 + v6 小组积分合并成新结构 */
 function migrateData() {
@@ -3796,7 +4114,6 @@ function saveTreeGrowth(force) {
   try {
     localStorage.setItem(TREE_KEY, String(Math.round(treeGrowth)));
   } catch (e) {}
-  d1Push('treeGrowth', Math.round(treeGrowth));
 }
 
 function loadTreeGrowth() {
@@ -3897,9 +4214,6 @@ treeGrowth = loadTreeGrowth();
 renderTreeUI(0, treeGrowth);
 lastStageIndex = -1;
 updateStageTrack(treeGrowth);
-
-/* 所有模块初始化完成后，从 D1 拉取全局数据（异步，云端为准） */
-syncFromD1();
 
 
 /* ==========================================================
@@ -5192,7 +5506,6 @@ document.addEventListener('fullscreenchange', syncFsBtn);
 window.addEventListener('beforeunload', () => {
   if (meterRunning) stopMeter();
   if (treeRunning) stopTreeMeter();
-  d1FlushKeepalive();   // 兜底：把待推送数据发往 D1
 });
 
 
